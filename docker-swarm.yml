@@ -1,0 +1,477 @@
+version: '3.7'
+
+volumes:
+  rdb:
+  nrdb:
+  wiki_db:
+  wiki_images:
+  wiki_upload:
+  uploads:
+  monit_status:
+  mmonit_db:
+  api_logs:
+  backups_data:
+  backups_web:
+  web_html:
+  translations_db:
+
+networks:
+  backups:
+  frontal-stage:
+    external: true
+
+services:
+  translations-cdn:
+    image: reg.rallf.com:8443/poeditor-cdn
+    environment:
+      - DATABASE_URL=postgresql://trans:${APP_SECRET}@translations-cdn-db:5432/trans?schema=trans
+      - PORT=3000
+      - POEDITOR_TOKEN=${POEDITOR_TOKEN}
+    networks:
+      - default
+      - frontal-stage
+      - backups
+    deploy:
+      placement:
+        constraints:
+          - node.labels.rec.translations == stage
+    
+      labels:
+        traefik.frontend.rule: Host:translations-cdn.${APP_DOMAIN}
+        traefik.port: 3000
+        traefik.enable: "true"
+        traefik.tags: "stage"
+
+  translations-cdn-db:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=trans
+      - POSTGRES_PASSWORD=${APP_SECRET}
+      - POSTGRES_DB=trans
+      - DB_SCHEMA=trans
+
+    volumes:
+      - translations_db:/var/lib/postgresql/data
+    deploy:
+      placement:
+        constraints:
+          - node.labels.rec.translations == stage
+
+
+  web3:
+    image: reg.rallf.com:8443/rec-web3-atarca-flask
+    networks:
+      - default
+      - backups
+    deploy:
+      placement:
+        constraints:
+          - node.labels.rec.web3 == stage
+
+  business:
+    image: reg.rallf.com:8443/rezero-b2b
+    environment:
+      - CLIENT_ID=${B2B_CLIENT_ID}
+      - CLIENT_SECRET=${B2B_CLIENT_SECRET}
+      - API_URL=api.${APP_DOMAIN}
+      - DISCOURSE_URL=${DISCOURSE_URL}
+      - PLATFORM=${PLATFORM}
+      - DISCOURSE_BRIDGE_PATH=${DISCOURSE_BRIDGE_PATH}
+    networks:
+      - frontal-stage
+      - backups
+    deploy:
+      placement:
+        constraints:
+          - node.labels.rec.business == stage
+      labels:
+        traefik.frontend.rule: Host:business.${APP_DOMAIN}
+        traefik.frontend.auth.basic.users: admin:$$xxxxxxxxxxxxxxxxxx
+        traefik.frontend.auth.basic.realm: "Restricted area"
+        traefik.port: 80
+        traefik.enable: "true"
+        traefik.tags: "stage"
+
+  backups-server:
+    image: qbitartifacts/disasterman
+    environment:
+      - ADMIN_PASSWORD=qbit
+      - HEADER_NAME=REC Backups [STAGE]
+    volumes:
+      - backups_data:/backups
+      - backups_web:/etc/rdiffweb
+    networks:
+      - frontal-stage
+      - backups
+    deploy:
+      placement:
+        constraints:
+          - node.labels.env == stage
+          - node.labels.backups == server
+      labels:
+        traefik.frontend.rule: Host:backups.${APP_DOMAIN}
+        traefik.frontend.auth.basic.users: admin:$$xxxxxxxxxxxxxxxxxx
+        traefik.frontend.auth.basic.realm: "Restricted area"
+        traefik.port: 8080
+        traefik.enable: "true"
+        traefik.tags: "stage"
+          
+  backups-agent:
+    image: qbitartifacts/disasterman-agent
+    hostname: backup-{{.Node.Hostname}}
+    networks:
+      - backups
+    environment:
+      - SERVER=backups-server
+      - CRON_SCHEDULE=0 * * * *
+    volumes:
+      - /var/lib/docker/volumes:/volumes
+    depends_on:
+      - server
+    deploy:
+      mode: global
+      placement:
+        constraints:
+          - node.labels.env == stage
+          - node.labels.backups != server
+  landing:
+    image: nginx
+    networks:
+      - frontal-stage
+    deploy:
+      placement:
+        constraints:
+          - node.labels.owner == qbit
+          - node.labels.disk.size != small
+      labels:
+        traefik.frontend.rule: Host:${APP_DOMAIN}
+        traefik.port: 80
+        traefik.enable: "true"
+        traefik.tags: "stage"
+    
+  pos:
+    image: reg.rallf.com:8443/rec-pos
+    environment:
+      - POS_TITLE=REC
+      - POS_API_BASE_URL=https://api.${APP_DOMAIN}
+      - POS_CLIENT_ID=1_23zebs1ciqsk088s4wckckgwkcogo8ws8os48osc40s0s8ss0k
+      - POS_CLIENT_SECRET=2zspa4vc6ask0wk0kcso0sowg0w088k00k00gkcs8ggs0g400g
+    networks:
+      - frontal-stage
+      - default
+    deploy:
+      placement:
+        constraints:
+          - node.labels.purpose == db
+          - node.labels.env == stage
+      labels:
+        traefik.frontend.rule: Host:pos.${APP_DOMAIN}
+        traefik.frontend.auth.basic.users: admin:$$xxxxxxxxxxxxxxxxxx
+        traefik.frontend.auth.basic.realm: "Restricted area"
+        traefik.port: 80
+        traefik.enable: "true"
+        traefik.tags: "stage"
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+
+  admin:
+    image: reg.rallf.com:8443/rec-admin
+    environment:
+      - PANEL_TITLE=REC Admin
+      - PANEL_API_URL=https://api.${APP_DOMAIN}
+      - PANEL_ORGANIZATION_NAME=QBit Artifacts SL
+      - PANEL_WEB_URL=https://${APP_DOMAIN}
+      - PANEL_FAVICON_URL=https://rec.barcelona/wp-content/uploads/2018/04/favicon_16_rec_simbol.png
+      - PANEL_TOS_URL=https://rec.barcelona/legal.html
+      - PANEL_COPYRIGHT_YEAR=2018
+      - PANEL_API_DOCS_URL=https://dev.${APP_DOMAIN}
+      - PANEL_SANDBOX_FRONT_URL=https://dev.${APP_DOMAIN}
+      - PANEL_SUPPORT_URL=https://support.${APP_DOMAIN}
+      - PANEL_CLIENT_ID=xxxxxxxxxxxxxxxxxx
+      - PANEL_CLIENT_SECRET=yyyyyyyyyyyyyyyyyyy
+      - PANEL_CAPTCHA_KEY=zzzzzzzzzzzzzz
+      - NOVACT_ID=${APP_ROOT_GROUP}
+      - SENTRY_DSN=${SENTRY_DSN_PANEL}
+
+    networks:
+      - frontal-stage
+      - default
+    deploy:
+      placement:
+        constraints:
+          - node.labels.purpose == db
+          - node.labels.env == stage
+      labels:
+        traefik.frontend.rule: Host:admin.${APP_DOMAIN}
+        traefik.frontend.auth.basic.users: admin:$$xxxxxxxxxxxxxxxxxx
+        traefik.frontend.auth.basic.realm: "Restricted area"
+        traefik.port: 80
+        traefik.enable: "true"
+        traefik.tags: "stage"
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 180s
+        
+  dev:
+    image: reg.rallf.com:8443/rec-dev
+    environment:
+      - NAME=REC
+      - FAVICON_PATH=xxx
+      - LOGO_HEADER_PATH=https://rec.barcelona/wp-content/uploads/2018/04/Group-3116@2x.png
+      - BG_URL=https://rec.barcelona/wp-content/uploads/2018/04/Slide_home_REC_WEB.jpg
+      - DOMAIN=${APP_DOMAIN}
+      - API_DOMAIN=api.${APP_DOMAIN}
+      - API_URL=https://api.${APP_DOMAIN}
+      - WIKI_URL=https://wiki.${APP_DOMAIN}
+      - POS_URL=https://pos.${APP_DOMAIN}
+    networks:
+      - frontal-stage
+    deploy:
+      placement:
+        constraints:
+          - node.labels.owner == qbit
+          - node.labels.disk.size != small
+      labels:
+        traefik.frontend.rule: Host:dev.${APP_DOMAIN}
+        traefik.port: 80
+        traefik.enable: "true"
+        traefik.tags: "stage"
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+    
+  api:
+    image: reg.rallf.com:8443/rec-api
+    environment:
+      - APP_ENV=prod
+      - APP_SECRET=${APP_SECRET}
+      - APP_API_URL=https://api.${APP_DOMAIN}
+      - APP_ADMIN_URL=https://admin.${APP_DOMAIN}
+      - MAILER_HOST=${MAILER_SERVER}
+      - MAILER_FROM=${MAILER_NOREPLY_FROM}
+      - MAILER_USERNAME=${MAILER_NOREPLY_USERNAME}
+      - MAILER_PASSWORD=${MAILER_NOREPLY_PASSWORD}
+      - UPC_NOTIFICATION_URL=${UPC_NOTIFICATION_URL}
+      - UPC_NOTIFICATION_USERNAME=${UPC_NOTIFICATION_USERNAME}
+      - UPC_NOTIFICATION_PASSWORD=${UPC_NOTIFICATION_PASSWORD}
+      - LABSMOBILE_USER=${LABSMOBILE_USER}
+      - LABSMOBILE_PASS=${LABSMOBILE_PASS}
+      - LEMONWAY_URL=${LEMONWAY_URL}
+      - LEMONWAY_PAYMENT_URL=${LEMONWAY_PAYMENT_URL}
+      - LEMONWAY_NOTIFICATION_URL=https://api.${APP_DOMAIN}/notifications/v1/lemonway/
+      - LEMONWAY_NOTIFICATION_APP=${LEMONWAY_NOTIFICATION_APP}
+      - LEMONWAY_USER=${LEMONWAY_USER}
+      - LEMONWAY_PASS=${LEMONWAY_PASS}
+      - LEMONWAY_VERSION=${LEMONWAY_VERSION}
+      - LEMONWAY_ADMIN_ACCOUNT=${LEMONWAY_ADMIN_ACCOUNT}
+      - AUTHORIZED_ADMINS_ARRAY=${AUTHORIZED_ADMINS_ARRAY}
+      - WITHDRAWAL_EMAIL_1=${WITHDRAWAL_EMAIL_1}
+      - WITHDRAWAL_EMAIL_2=${WITHDRAWAL_EMAIL_2}
+      - WITHDRAWAL_EMAIL_3=${WITHDRAWAL_EMAIL_3}
+      - NODE_HOST=${NODE_HOST}
+      - NODE_PORT=${NODE_PORT}
+      - APP_ROOT_GROUP=${APP_ROOT_GROUP}
+      - APP_ROOT_USER=${APP_ROOT_USER}
+      - APP_TREASURE_ADDRESS=${APP_TREASURE_ADDRESS}
+      - APP_ROOT_ADDRESS=${APP_ROOT_ADDRESS}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_LOG=${DEV_TELEGRAM_CHAT}
+      - TELEGRAM_CHAT_ERROR=${DEV_TELEGRAM_CHAT}
+      - BLOCKCHAIN_ADDRESS_PREFIX=${BLOCKCHAIN_ADDRESS_PREFIX}
+      - SENTRY_DSN=${SENTRY_DSN_API}
+      - POS_URL=https://pos.${APP_DOMAIN}
+      - KYC_EMAIL=${KYC_EMAIL}
+      - LEMONWAY_SYNC_BALANCE_LAST=${LEMONWAY_SYNC_BALANCE_LAST}
+      - DISCOURSE_URL=${DISCOURSE_URL}
+      - DISCOURSE_ADMIN_USERNAME=${DISCOURSE_ADMIN_USERNAME}
+      - DISCOURSE_ADMIN_API_KEY=${DISCOURSE_ADMIN_API_KEY}
+      - DISCOURSE_NEWS_CATEGORY_ID=${DISCOURSE_NEWS_CATEGORY_ID}
+      - ATARCA_WEB3_API_URL=http://web3:5000
+      - RESUME_ADMIN_EMAILS_LIST=${RESUME_ADMIN_EMAILS_LIST}
+      - SHARABLE_NFT_CONTRACT_ADDRESS=${SHARABLE_NFT_CONTRACT_ADDRESS}
+      - LIKE_NFT_CONTRACT_ADDRESS=${LIKE_NFT_CONTRACT_ADDRESS}
+    volumes:
+      - uploads:/api/web/static
+      - api_logs:/api/var/logs
+    networks:
+      - frontal-stage
+      - default
+    depends_on:
+      - rdb
+      - nrdb
+    deploy:
+      labels:
+        traefik.frontend.rule: Host:api.${APP_DOMAIN}
+        traefik.port: 80
+        traefik.enable: "true"
+        traefik.tags: "stage"
+      placement:
+        constraints:
+          - node.labels.purpose == db
+          - node.labels.owner == qbit
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 60s
+  cron:
+    image: reg.rallf.com:8443/rec-cron
+    environment:
+      - APP_ENV=prod
+      - APP_SECRET=${APP_SECRET}
+      - APP_API_URL=https://api.${APP_DOMAIN}
+      - APP_ADMIN_URL=https://admin.${APP_DOMAIN}
+      - MAILER_HOST=${MAILER_SERVER}
+      - MAILER_FROM=${MAILER_NOREPLY_FROM}
+      - MAILER_USERNAME=${MAILER_NOREPLY_USERNAME}
+      - MAILER_PASSWORD=${MAILER_NOREPLY_PASSWORD}
+      - UPC_NOTIFICATION_URL=${UPC_NOTIFICATION_URL}
+      - UPC_NOTIFICATION_USERNAME=${UPC_NOTIFICATION_USERNAME}
+      - UPC_NOTIFICATION_PASSWORD=${UPC_NOTIFICATION_PASSWORD}
+      - LABSMOBILE_USER=${LABSMOBILE_USER}
+      - LABSMOBILE_PASS=${LABSMOBILE_PASS}
+      - LEMONWAY_URL=${LEMONWAY_URL}
+      - LEMONWAY_PAYMENT_URL=${LEMONWAY_PAYMENT_URL}
+      - LEMONWAY_NOTIFICATION_URL=https://api.${APP_DOMAIN}/notifications/v1/lemonway/
+      - LEMONWAY_NOTIFICATION_APP=${LEMONWAY_NOTIFICATION_APP}
+      - LEMONWAY_USER=${LEMONWAY_USER}
+      - LEMONWAY_PASS=${LEMONWAY_PASS}
+      - LEMONWAY_VERSION=${LEMONWAY_VERSION}
+      - LEMONWAY_ADMIN_ACCOUNT=${LEMONWAY_ADMIN_ACCOUNT}
+      - AUTHORIZED_ADMINS_ARRAY=${AUTHORIZED_ADMINS_ARRAY}
+      - WITHDRAWAL_EMAIL_1=${WITHDRAWAL_EMAIL_1}
+      - WITHDRAWAL_EMAIL_2=${WITHDRAWAL_EMAIL_2}
+      - WITHDRAWAL_EMAIL_3=${WITHDRAWAL_EMAIL_3}
+      - NODE_HOST=${NODE_HOST}
+      - NODE_PORT=${NODE_PORT}
+      - APP_ROOT_GROUP=${APP_ROOT_GROUP}
+      - APP_ROOT_USER=${APP_ROOT_USER}
+      - APP_TREASURE_ADDRESS=${APP_TREASURE_ADDRESS}
+      - APP_ROOT_ADDRESS=${APP_ROOT_ADDRESS}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_LOG=${DEV_TELEGRAM_CHAT}
+      - TELEGRAM_CHAT_ERROR=${DEV_TELEGRAM_CHAT}
+      - BLOCKCHAIN_ADDRESS_PREFIX=${BLOCKCHAIN_ADDRESS_PREFIX}
+      - SENTRY_DSN=${SENTRY_DSN_API}
+      - POS_URL=https://pos.${APP_DOMAIN}
+      - KYC_EMAIL=${KYC_EMAIL}
+      - LEMONWAY_SYNC_BALANCE_LAST=${LEMONWAY_SYNC_BALANCE_LAST}
+      - DISCOURSE_URL=${DISCOURSE_URL}
+      - DISCOURSE_ADMIN_USERNAME=${DISCOURSE_ADMIN_USERNAME}
+      - DISCOURSE_ADMIN_API_KEY=${DISCOURSE_ADMIN_API_KEY}
+      - DISCOURSE_NEWS_CATEGORY_ID=${DISCOURSE_NEWS_CATEGORY_ID}
+      - ATARCA_WEB3_API_URL=http://web3:5000
+      - RESUME_ADMIN_EMAILS_LIST=${RESUME_ADMIN_EMAILS_LIST}
+      - SHARABLE_NFT_CONTRACT_ADDRESS=${SHARABLE_NFT_CONTRACT_ADDRESS}
+      - LIKE_NFT_CONTRACT_ADDRESS=${LIKE_NFT_CONTRACT_ADDRESS}
+    volumes:
+      - uploads:/api/web/static
+      - api_logs:/api/var/logs
+    depends_on:
+      - rdb
+      - nrdb
+    deploy:
+      placement:
+        constraints:
+          - node.labels.purpose == db
+          - node.labels.owner == qbit
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+
+  rdb:
+    image: mariadb
+    environment:
+      - MYSQL_DATABASE=app
+      - MYSQL_USER=app
+      - MYSQL_PASSWORD=${APP_SECRET}
+      - MYSQL_RANDOM_ROOT_PASSWORD=yes
+    volumes:
+      - rdb:/var/lib/mysql
+    deploy:
+      placement:
+        constraints:
+          - node.labels.purpose == db
+          - node.labels.owner == qbit
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+
+  rdbadmin:
+    image: phpmyadmin/phpmyadmin
+    environment:
+      - PMA_HOST=rdb
+      - PMA_PORT=3306
+    depends_on:
+      - rdb
+    networks:
+      - frontal-stage
+      - default
+    deploy:
+      placement:
+        constraints:
+          - node.labels.owner == qbit
+          - node.labels.disk.size != small
+      labels:
+        traefik.frontend.rule: Host:rdbadmin.${APP_DOMAIN}
+        traefik.frontend.auth.basic.users: admin:$$xxxxxxxxxxxxxxxxxxxxx
+        traefik.frontend.auth.basic.realm: "Restricted area"
+        traefik.port: 80
+        traefik.enable: "true"
+        traefik.tags: "stage"
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+
+  nrdb:
+    image: mongo:4.0
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=app
+      - MONGO_INITDB_ROOT_PASSWORD=${APP_SECRET}
+    volumes:
+      - nrdb:/data/db
+    deploy:
+      placement:
+        constraints:
+          - node.labels.purpose == db
+          - node.labels.owner == qbit
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+
+  nrdbadmin:
+    image: mongo-express
+    environment:
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=app
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=${APP_SECRET}
+      - ME_CONFIG_MONGODB_SERVER=nrdb
+    depends_on:
+      - nrdb
+    networks:
+      - frontal-stage
+      - default
+    deploy:
+      placement:
+        constraints:
+          - node.labels.owner == qbit
+          - node.labels.disk.size != small
+      labels:
+        traefik.frontend.rule: Host:nrdbadmin.${APP_DOMAIN}
+        traefik.frontend.auth.basic.users: admin:$$xxxxxxxxxxxxxxxxxx
+        traefik.frontend.auth.basic.realm: "Restricted area"
+        traefik.port: 8081
+        traefik.enable: "true"
+        traefik.tags: "stage"
+      replicas: 1
+      update_config:
+        parallelism: 1
+        delay: 10s
+
+
